@@ -21,7 +21,7 @@ jobs:
       - run: npm run compile
 
       - name: Package VSIX
-        run: npx @vscode/vsce package --allow-all-proposed-apis -o oai-compatible-copilot.vsix
+        run: npx @vscode/vsce package -o oai-compatible-copilot.vsix
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
