@@ -247,6 +247,7 @@ export class OllamaApi extends CommonApi<OllamaMessage, OllamaRequestBody> {
 
 			// Emit text content
 			progress.report(new vscode.LanguageModelTextPart(message.content));
+			this._hasEmittedAssistantText = true;
 		}
 	}
 

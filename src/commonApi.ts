@@ -202,6 +202,12 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 	 * @param progress Progress reporter for parts
 	 */
 	protected bufferThinkingContent(text: string, progress: Progress<LanguageModelResponsePart2>): void {
+		// Copilot Chat expects thinking to stream before the final response text.
+		// Some providers can emit late reasoning chunks after text has started; suppress them to avoid interleaving.
+		if (this._hasEmittedAssistantText) {
+			return;
+		}
+
 		this._hasEmittedThinking = true;
 		// Generate thinking ID if not provided by the model
 		if (!this._currentThinkingId) {
@@ -287,6 +293,8 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 		const textToEmit = input;
 		if (textToEmit && textToEmit.length > 0) {
 			progress.report(new vscode.LanguageModelTextPart(textToEmit));
+			this._hasEmittedAssistantText = true;
+			this._hasEmittedText = true;
 			emittedAny = true;
 		}
 
@@ -342,7 +350,9 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 					const flush = keep ? data.slice(0, -keep.length) : data;
 
 					if (handledAny || keep) {
-						emitAssistantText(flush);
+						if (flush.trim().length > 0 || this._hasEmittedAssistantText) {
+							emitAssistantText(flush);
+						}
 						this._xmlThinkTagBuffer = keep;
 						handledAny = true;
 					}
@@ -350,8 +360,12 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 					break;
 				}
 
+				const prefix = data.slice(0, startIdx);
 				// Any text before the think tag is normal output; the caller won't emit it because a tag exists.
-				emitAssistantText(data.slice(0, startIdx));
+				// Avoid emitting leading whitespace before the first <think> tag to prevent prematurely ending thinking.
+				if (prefix.trim().length > 0 || this._hasEmittedAssistantText) {
+					emitAssistantText(prefix);
+				}
 
 				// Found think start tag - mark that we processed XML tags
 				handledAny = true;

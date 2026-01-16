@@ -332,6 +332,9 @@ export class AnthropicApi extends CommonApi<AnthropicMessage, AnthropicRequestBo
 			}
 		} else if (chunk.type === "content_block_delta" && chunk.delta) {
 			if (chunk.delta.type === "text_delta" && chunk.delta.text) {
+				// Ensure any pending thinking buffer is flushed before emitting assistant text
+				this.reportEndThinking(progress);
+
 				// Emit text content
 				progress.report(new vscode.LanguageModelTextPart(chunk.delta.text));
 				this._hasEmittedAssistantText = true;
