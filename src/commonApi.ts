@@ -36,7 +36,7 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 
 	// XML think block parsing state
 	protected _xmlThinkActive = false;
-	protected _xmlThinkDetectionAttempted = false;
+	protected _xmlThinkTagBuffer = "";
 
 	// Thinking content state management
 	protected _currentThinkingId: string | null = null;
@@ -301,30 +301,60 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 		input: string,
 		progress: Progress<LanguageModelResponsePart2>
 	): { emittedAny: boolean } {
-		// If we've already attempted detection and found no THINK_START, skip processing
-		if (this._xmlThinkDetectionAttempted && !this._xmlThinkActive) {
-			return { emittedAny: false };
-		}
-
 		const THINK_START = "<think>";
 		const THINK_END = "</think>";
 
-		let data = input;
-		let emittedAny = false;
+		const bufferedPrefix = this._xmlThinkTagBuffer;
+		this._xmlThinkTagBuffer = "";
+
+		let data = bufferedPrefix + input;
+		let handledAny = this._xmlThinkActive || bufferedPrefix.length > 0;
+
+		const MAX_PARTIAL_LEN = Math.max(THINK_START.length, THINK_END.length) - 1;
+		const findPartialSuffix = (value: string, tag: string): string => {
+			const limit = Math.min(MAX_PARTIAL_LEN, value.length);
+			for (let i = limit; i > 0; i--) {
+				const suffix = value.slice(-i);
+				if (tag.startsWith(suffix)) {
+					return suffix;
+				}
+			}
+			return "";
+		};
+
+		const emitAssistantText = (text: string) => {
+			if (!text) {
+				return;
+			}
+
+			this.reportEndThinking(progress);
+			progress.report(new vscode.LanguageModelTextPart(text));
+			this._hasEmittedAssistantText = true;
+			this._hasEmittedText = true;
+		};
 
 		while (data.length > 0) {
 			if (!this._xmlThinkActive) {
 				// Look for think start tag
 				const startIdx = data.indexOf(THINK_START);
 				if (startIdx === -1) {
-					// No think start found, mark detection as attempted and skip future processing
-					this._xmlThinkDetectionAttempted = true;
-					data = "";
+					const keep = findPartialSuffix(data, THINK_START);
+					const flush = keep ? data.slice(0, -keep.length) : data;
+
+					if (handledAny || keep) {
+						emitAssistantText(flush);
+						this._xmlThinkTagBuffer = keep;
+						handledAny = true;
+					}
+
 					break;
 				}
 
+				// Any text before the think tag is normal output; the caller won't emit it because a tag exists.
+				emitAssistantText(data.slice(0, startIdx));
+
 				// Found think start tag - mark that we processed XML tags
-				emittedAny = true;
+				handledAny = true;
 				this._xmlThinkActive = true;
 
 				// Skip the start tag and continue processing
@@ -335,22 +365,34 @@ export abstract class CommonApi<TMessage, TRequestBody> {
 			// We are inside a think block, look for end tag
 			const endIdx = data.indexOf(THINK_END);
 			if (endIdx === -1) {
-				this.bufferThinkingContent(data, progress);
-				emittedAny = true;
-				data = "";
+				const keep = findPartialSuffix(data, THINK_END);
+				const flush = keep ? data.slice(0, -keep.length) : data;
+
+				if (flush) {
+					this.bufferThinkingContent(flush, progress);
+					handledAny = true;
+				}
+
+				this._xmlThinkTagBuffer = keep;
+				handledAny = true;
 				break;
 			}
 
 			// Found end tag, buffer final thinking content before the end tag
 			const thinkContent = data.slice(0, endIdx);
-			this.bufferThinkingContent(thinkContent, progress);
+			if (thinkContent) {
+				this.bufferThinkingContent(thinkContent, progress);
+			}
 
 			// Mark end tag as processed and reset state
-			emittedAny = true;
+			handledAny = true;
 			this._xmlThinkActive = false;
 			data = data.slice(endIdx + THINK_END.length);
+
+			// Close the thinking sequence so subsequent output doesn't appear inside it.
+			this.reportEndThinking(progress);
 		}
 
-		return { emittedAny };
+		return { emittedAny: handledAny };
 	}
 }
