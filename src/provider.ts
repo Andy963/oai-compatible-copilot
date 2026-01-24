@@ -175,20 +175,20 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 			// Check if using Ollama native API mode
 			const apiMode = um?.apiMode ?? "openai";
 
-				// prepare headers with custom headers if specified
-				const requestHeaders = CommonApi.prepareHeaders(modelApiKey, apiMode, um?.headers);
-				const configuredSessionId = getHeaderValueCaseInsensitive(requestHeaders, "x-session-id")?.trim();
-				let sessionIdForMarker: string | null = null;
-				let shouldAppendSessionMarker = false;
-				if (!configuredSessionId) {
-					const sessionMarker = findLastSessionIdMarker(messages);
-					const sessionId = sessionMarker?.sessionId ?? generateSessionId();
-					setHeaderValueCaseInsensitive(requestHeaders, "x-session-id", sessionId);
-					if (!sessionMarker) {
-						sessionIdForMarker = sessionId;
-						shouldAppendSessionMarker = true;
-					}
+			// prepare headers with custom headers if specified
+			const requestHeaders = CommonApi.prepareHeaders(modelApiKey, apiMode, um?.headers);
+			const configuredSessionId = getHeaderValueCaseInsensitive(requestHeaders, "x-session-id")?.trim();
+			let sessionIdForMarker: string | null = null;
+			let shouldAppendSessionMarker = false;
+			if (!configuredSessionId) {
+				const sessionMarker = findLastSessionIdMarker(messages);
+				const sessionId = sessionMarker?.sessionId ?? generateSessionId();
+				setHeaderValueCaseInsensitive(requestHeaders, "x-session-id", sessionId);
+				if (!sessionMarker) {
+					sessionIdForMarker = sessionId;
+					shouldAppendSessionMarker = true;
 				}
+			}
 
 			// console.debug("[OAI Compatible Model Provider] messages:", JSON.stringify(messages));
 			if (apiMode === "ollama") {
