@@ -38,6 +38,7 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 	private readonly _openaiResponsesPreviousResponseIdUnsupportedBaseUrls = new Set<string>();
 
 	static readonly OPENAI_RESPONSES_STATEFUL_MARKER_MIME = "application/vnd.oaicopilot.stateful-marker";
+	static readonly SESSION_ID_MARKER_MIME = "application/vnd.oaicopilot.session-id";
 
 	/**
 	 * Create a provider using the given secret storage for the API key.
@@ -174,8 +175,20 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 			// Check if using Ollama native API mode
 			const apiMode = um?.apiMode ?? "openai";
 
-			// prepare headers with custom headers if specified
-			const requestHeaders = CommonApi.prepareHeaders(modelApiKey, apiMode, um?.headers);
+				// prepare headers with custom headers if specified
+				const requestHeaders = CommonApi.prepareHeaders(modelApiKey, apiMode, um?.headers);
+				const configuredSessionId = getHeaderValueCaseInsensitive(requestHeaders, "x-session-id")?.trim();
+				let sessionIdForMarker: string | null = null;
+				let shouldAppendSessionMarker = false;
+				if (!configuredSessionId) {
+					const sessionMarker = findLastSessionIdMarker(messages);
+					const sessionId = sessionMarker?.sessionId ?? generateSessionId();
+					setHeaderValueCaseInsensitive(requestHeaders, "x-session-id", sessionId);
+					if (!sessionMarker) {
+						sessionIdForMarker = sessionId;
+						shouldAppendSessionMarker = true;
+					}
+				}
 
 			// console.debug("[OAI Compatible Model Provider] messages:", JSON.stringify(messages));
 			if (apiMode === "ollama") {
@@ -457,16 +470,20 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 					return res;
 				}, retryConfig);
 
-				if (!response.body) {
-					throw new Error("No response body from OAI Compatible API");
+					if (!response.body) {
+						throw new Error("No response body from OAI Compatible API");
+					}
+					await openaiApi.processStreamingResponse(response.body, trackingProgress, token);
 				}
-				await openaiApi.processStreamingResponse(response.body, trackingProgress, token);
-			}
-		} catch (err) {
-			console.error("[OAI Compatible Model Provider] Chat request failed", {
-				modelId: model.id,
-				messageCount: messages.length,
-				error: err instanceof Error ? { name: err.name, message: err.message } : String(err),
+
+				if (shouldAppendSessionMarker && sessionIdForMarker) {
+					trackingProgress.report(createSessionIdMarkerPart(sessionIdForMarker));
+				}
+			} catch (err) {
+				console.error("[OAI Compatible Model Provider] Chat request failed", {
+					modelId: model.id,
+					messageCount: messages.length,
+					error: err instanceof Error ? { name: err.name, message: err.message } : String(err),
 			});
 			throw err;
 		} finally {
@@ -523,7 +540,15 @@ export class HuggingFaceChatModelProvider implements LanguageModelChatProvider {
 	}
 }
 
-type OpenAIResponsesStatefulMarkerLocation = { marker: string; index: number };
+interface OpenAIResponsesStatefulMarkerLocation {
+	marker: string;
+	index: number;
+}
+
+interface SessionIdMarkerLocation {
+	sessionId: string;
+	index: number;
+}
 
 function createOpenAIResponsesStatefulMarkerPart(modelId: string, marker: string): vscode.LanguageModelDataPart {
 	const payload = `${modelId}\\${marker}`;
@@ -575,6 +600,86 @@ function findLastOpenAIResponsesStatefulMarker(
 			const parsed = parseOpenAIResponsesStatefulMarkerPart(part);
 			if (parsed && parsed.modelId === modelId) {
 				return { marker: parsed.marker, index: i };
+			}
+		}
+	}
+	return null;
+}
+
+function getHeaderValueCaseInsensitive(headers: Record<string, string>, name: string): string | undefined {
+	const target = name.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === target) {
+			return value;
+		}
+	}
+	return undefined;
+}
+
+function setHeaderValueCaseInsensitive(headers: Record<string, string>, name: string, value: string): void {
+	const target = name.toLowerCase();
+	for (const key of Object.keys(headers)) {
+		if (key.toLowerCase() === target) {
+			headers[key] = value;
+			return;
+		}
+	}
+	headers[name] = value;
+}
+
+function generateSessionId(): string {
+	const maybeCrypto = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+	const randomUUID = maybeCrypto?.randomUUID;
+	if (typeof randomUUID === "function") {
+		try {
+			const id = randomUUID.call(maybeCrypto);
+			if (id) {
+				return id;
+			}
+		} catch {
+			// fall through
+		}
+	}
+	return `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createSessionIdMarkerPart(sessionId: string): vscode.LanguageModelDataPart {
+	const bytes = new TextEncoder().encode(sessionId);
+	return new vscode.LanguageModelDataPart(bytes, HuggingFaceChatModelProvider.SESSION_ID_MARKER_MIME);
+}
+
+function parseSessionIdMarkerPart(part: unknown): string | null {
+	const maybe = part as { mimeType?: unknown; data?: unknown };
+	if (!maybe || typeof maybe !== "object") {
+		return null;
+	}
+	if (typeof maybe.mimeType !== "string") {
+		return null;
+	}
+	if (!(maybe.data instanceof Uint8Array)) {
+		return null;
+	}
+	if (maybe.mimeType !== HuggingFaceChatModelProvider.SESSION_ID_MARKER_MIME) {
+		return null;
+	}
+
+	try {
+		const decoded = new TextDecoder().decode(maybe.data).trim();
+		return decoded ? decoded : null;
+	} catch {
+		return null;
+	}
+}
+
+function findLastSessionIdMarker(messages: readonly LanguageModelChatRequestMessage[]): SessionIdMarkerLocation | null {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].role !== vscode.LanguageModelChatMessageRole.Assistant) {
+			continue;
+		}
+		for (const part of messages[i].content ?? []) {
+			const sessionId = parseSessionIdMarkerPart(part);
+			if (sessionId) {
+				return { sessionId, index: i };
 			}
 		}
 	}
